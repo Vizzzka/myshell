@@ -1,4 +1,4 @@
-# Lab 2 Option 3: Adder
+# Lab 2 Option 3: Myshell
 
 ## Team
 

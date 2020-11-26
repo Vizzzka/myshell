@@ -5,7 +5,6 @@
 #include "commands.h"
 #include "parsing.h"
 #include "config.h"
-#include <stdio.h>
 
 
 int main(int argc, char** argv) {
@@ -14,14 +13,8 @@ int main(int argc, char** argv) {
     if (get_commandline_options(argc, argv)) {
         return EXIT_SUCCESS;
     }
-
     // add current path to env
-    auto path_ptr = getenv("PATH");
-    std::string path_var;
-    if (path_ptr != nullptr)
-        path_var = path_ptr;
-    path_var += ":./:./external_commands";
-    setenv("PATH", path_var.c_str(), 1);
+    add_path_to_env(":./:./external_commands");
     // config rl streams
     rl_instream = stdin;
     rl_outstream = stdout;

@@ -1,16 +1,23 @@
-#include <vector>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
-#include <string>
 #include <map>
 #include <iostream>
-#include <stdio.h>
 #include <fnmatch.h>
 #include <boost/algorithm/string.hpp>
+#ifdef __unix__
+#include <sys/wait.h>
+#elif WIN32
+#include "windows.h"
+#include "shlwapi.h"
+#include <dirent.h>
+#else: error unknown OS
+#endif
+
 #include "commands.h"
 #include "parsing.h"
-#include <sys/wait.h>
 
+
+// todo: fix merrno with scripts
 
 namespace fs = boost::filesystem;
 namespace po = boost::program_options;
@@ -86,11 +93,9 @@ int parse_line(const std::string& line, std::vector<std::string>& arguments) {
     return 0;
 }
 
-int execute(std::string& command, std::vector<std::string>& arguments) {
-    if (internal_functions.find(command) != internal_functions.end()) {
-        return internal_functions.find(command)->second(arguments);
-    }
-    // todo if there are arguments except script name
+#ifdef __unix__
+void fork_exec(std::string& command, std::vector<std::string>& arguments) {
+
     pid_t parent = getpid();
     pid_t pid = fork();
     if (fs::path(command).extension() == ".msh") {
@@ -121,7 +126,19 @@ int execute(std::string& command, std::vector<std::string>& arguments) {
         std::cerr << "Parent: Failed to execute " << command << " \n\tCode: " << errno << "\n";
         exit(EXIT_FAILURE);   // exec never returns
     }
+}
+#elif WIN32
+void fork_exec(std::string& command, std::vector<std::string>& arguments) {
 
+}
+#else error: undefinded OS
+#endif
+
+int execute(std::string& command, std::vector<std::string>& arguments) {
+    if (internal_functions.find(command) != internal_functions.end()) {
+        return internal_functions.find(command)->second(arguments);
+    }
+    fork_exec(command, arguments);
     return 0;
 }
 
@@ -150,6 +167,7 @@ void expand_variables(std::vector<std::string>& arguments) {
     for (auto& arg : arguments) {
         if (arg[0] != '$') continue;
         std::string var_name = arg.substr(1);
+#ifdef __unix__
         if (getenv(var_name.c_str())  != nullptr) {
             arg = getenv(var_name.c_str());
         }
@@ -157,4 +175,18 @@ void expand_variables(std::vector<std::string>& arguments) {
             arg = "";
         }
     }
+#elif WIN32
+    //GetEnvironmentVariable();
+#else
+#error: unknown OS
+#endif
+}
+
+int add_path_to_env(const std::string& new_path) {
+    auto path_ptr = getenv("PATH");
+    std::string path_var;
+    if (path_ptr != nullptr)
+        path_var = path_ptr;
+    path_var += new_path;
+    setenv("PATH", path_var.c_str(), 1);
 }

@@ -1,13 +1,12 @@
 #include "commands.h"
 #include <iostream>
 #include <boost/filesystem.hpp>
-#ifdef __unix__
-#include <sys/wait.h>
-#include "unistd.h"
-#include <stdlib.h>
 #include "boost/program_options.hpp"
+#ifdef __unix__
+
 #elif WIN32
 #include <direct.h>
+#include <windows.h>
 #else
 #error: unknown OS
 #endif
@@ -16,7 +15,7 @@ namespace fs = boost::filesystem;
 namespace po = boost::program_options;
 int merrno_code;
 bool is_help;
-//todo mcd error
+
 bool get_options(const std::vector<std::string>& arguments, const std::string& usage_message, std::string& err_msg) {
     bool no_wrong_option = true;
     po::options_description all("Supported options");
@@ -154,7 +153,14 @@ int mexport(const std::vector<std::string>& arguments) {
     }
     var_name = var.substr(0, pos);
     var_value = var.substr(pos + 1);
+#ifdef WIN32
+    // SetEnvironmentVariable();
+#elif __unix__
     merrno_code = setenv(var_name.c_str(), var_value.c_str(), 1);
+#else
+#error:unknown OS
+#endif
+
     return merrno_code;
 }
 

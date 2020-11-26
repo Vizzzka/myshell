@@ -9,10 +9,14 @@ int get_commandline_options(int argc, char **argv);
 
 int parse_line(const std::string& line, std::vector<std::string>& arguments);
 
+void fork_exec(std::string& command, std::vector<std::string>& arguments);
+
 int execute(std::string& command, std::vector<std::string>& arguments);
 
 bool read_line_from_shell(std::string& line);
 
 void expand_variables(std::vector<std::string>& arguments);
+
+int add_path_to_env(const std::string& new_path);
 
 #endif //MYSHELL_PARSING_H

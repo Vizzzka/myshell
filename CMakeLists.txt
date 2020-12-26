@@ -17,11 +17,14 @@ option(ENABLE_SANITIZERS    "Use sanitizers to detect errors."      OFF) # Optio
 add_subdirectory(external_commands/mycat ${CMAKE_CURRENT_BINARY_DIR}/external_commands)
 # Project source compilation
 include_directories(shell_commands)
+include_directories(errors_handling)
 include_directories(config)
 add_library(shell_commands STATIC
         src/shell_commands/commands.cpp shell_commands/commands.h)
+add_library(errors_handling STATIC
+        src/errors_handling/error_functions.cpp errors_handling/error_functions.h)
 add_executable(myshell src/main.cpp config/config.h src/config/config.cpp src/parsing.cpp src/parsing.h)
-target_link_libraries(myshell shell_commands)
+target_link_libraries(myshell shell_commands errors_handling)
 
 # Add external programs
 install(EXPORT mycat DESTINATION ${PROJECT_SOURCE_DIR}/bin)

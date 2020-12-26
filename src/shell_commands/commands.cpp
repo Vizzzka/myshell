@@ -2,14 +2,8 @@
 #include <iostream>
 #include <boost/filesystem.hpp>
 #include "boost/program_options.hpp"
-#ifdef __unix__
+#include "../src/parsing.h"
 
-#elif WIN32
-#include <direct.h>
-#include <windows.h>
-#else
-#error: unknown OS
-#endif
 
 namespace fs = boost::filesystem;
 namespace po = boost::program_options;
@@ -153,14 +147,17 @@ int mexport(const std::vector<std::string>& arguments) {
     }
     var_name = var.substr(0, pos);
     var_value = var.substr(pos + 1);
-#ifdef WIN32
-    // SetEnvironmentVariable();
-#elif __unix__
-    merrno_code = setenv(var_name.c_str(), var_value.c_str(), 1);
-#else
-#error:unknown OS
-#endif
 
+    // if var_value=$(command)
+    if (var_value.size() > 3 && var_value[0] == '$' && var_value[1] == '(' && var_value[var_value.size() - 1] == ')') {
+        std::vector<std::vector<std::string>> process_args;
+        var_value = var_value.substr(2, var_value.length() - 3);
+        parse_line(var_value, process_args);
+        merrno_code = execute(process_args);
+    }
+    else {
+        merrno_code = setenv(var_name.c_str(), var_value.c_str(), 1);
+    }
     return merrno_code;
 }
 

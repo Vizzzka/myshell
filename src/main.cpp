@@ -36,30 +36,38 @@ int main(int argc, char** argv) {
     // main loop
     while (true) {
         std::string line;
-        int is_end_of_file = read_line_from_shell(line);
+        int is_end_of_file = !read_line_from_shell(line);
         // if script from command line ended
-        if (!is_end_of_file && conf_t.is_script()) {
+        if (is_end_of_file && conf_t.is_script()) {
             return EXIT_SUCCESS;
         }
         // if script ended then change rl streams to command line
-        if (!is_end_of_file) {
+        if (is_end_of_file) {
             rl_instream = stdin;
             rl_outstream = stdout;
             read_line_from_shell(line);
         }
-        std::vector<std::string> arguments, new_arguments;
-        parse_line(line, arguments);
-        if (arguments[0].empty()) {
+        // parse line and get vector of arguments for each process
+        std::vector<std::vector<std::string>> processes_args;
+        parse_line(line, processes_args);
+        if (processes_args.empty()) {
             continue;
         }
-        expand_variables(arguments);
-        new_arguments.push_back(arguments[0]);
-        for (int i = 1; i < arguments.size(); ++i) {
-            std::vector<std::string> arg = std::move(replace_wildcard_filename(arguments[i]));
-            new_arguments.insert(new_arguments.end(), arg.begin(), arg.end());
-        }
-        execute(arguments[0], new_arguments);
-    }
 
-    return EXIT_SUCCESS;
+        // expand variables and replace wildcards for each proc
+        for (auto& args: processes_args) {
+            std::vector<std::string> new_args;
+            expand_variables(args);
+            new_args.push_back(args[0]);
+            for (int i = 1; i < args.size(); ++i) {
+                std::vector<std::string> arg = std::move(replace_wildcard_filename(args[i]));
+                new_args.insert(new_args.end(), arg.begin(), arg.end());
+            }
+            args = new_args;
+        }
+        if (processes_args[0][0].empty()) {
+            continue;
+        }
+        execute(processes_args);
+    }
 }

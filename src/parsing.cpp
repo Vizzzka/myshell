@@ -1,27 +1,24 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <map>
+#include <vector>
 #include <iostream>
 #include <fnmatch.h>
 #include <boost/algorithm/string.hpp>
-#ifdef __unix__
+#include <unistd.h>
 #include <sys/wait.h>
-#elif WIN32
-#include "windows.h"
-#include "shlwapi.h"
-#include <dirent.h>
-#else: error unknown OS
-#endif
+#include <sys/stat.h>
+#include <fcntl.h>
+
 
 #include "commands.h"
 #include "parsing.h"
-
+#include "error_functions.h"
 
 // todo: fix merrno with scripts
 
 namespace fs = boost::filesystem;
 namespace po = boost::program_options;
-typedef std::function<int (const std::vector<std::string> &)>  internal_func_type;
 
 const std::map<std::string, internal_func_type> internal_functions {
         { "merrno",  merrno},
@@ -79,24 +76,79 @@ int get_commandline_options(int argc, char **argv) {
     return 0;
 }
 
-int parse_line(const std::string& line, std::vector<std::string>& arguments) {
-    std::string parsed_string;
-    parsed_string = boost::algorithm::trim_copy(line);
-    std::string::size_type pos = parsed_string.find('#');
-    if (pos != std::string::npos)
-    {
-        parsed_string = parsed_string.substr(0, pos);
+bool is_redirection_symbol(std::string symbol) {
+    return symbol == ">" || symbol == "2>" || symbol == "&>" || symbol == "<" || symbol == "2>&1";
+}
+
+void redirect(std::vector<std::string> redir_args) {
+    if (redir_args.size() > 3 || redir_args.size() < 2) {
+        err_exit("No valid redirect");
+    }
+    if (redir_args.size() == 3 && !is_redirection_symbol(redir_args[2])) {
+        err_exit("No valid redirect");
+    }
+    std::string file_name = redir_args[1];
+
+    if (redir_args[0] == "<") {
+        int fd = open(file_name.c_str(), O_RDONLY);
+        if (fd == -1) {
+            err_exit("Unable open file for redirect");
+        }
+        dup2(fd, 0);  // Duplicate file handler -- redirect stdin
+    }
+    if (redir_args[0] == ">" && redir_args.size() == 2) {
+        int fd = open(file_name.c_str(), O_WRONLY);
+        if (fd == -1) {
+            err_exit("Unable open file for redirect");
+        }
+        dup2(fd, 1);  // Duplicate file handler -- redirect stdout
     }
 
-    boost::split(arguments, parsed_string, boost::is_any_of(" "));
+    if (redir_args[0] == "2>" && redir_args.size() == 2) {
+        int fd = open(file_name.c_str(), O_WRONLY);
+        if (fd == -1) {
+            err_exit("Unable open file for redirect");
+        }
+        dup2(fd, 2);  // Duplicate file handler -- redirect stdout
+    }
+
+    if (redir_args[0] == "&>" || (redir_args.size() == 3 && redir_args[0] == ">" && redir_args[2] == "2>&1")) {
+        int fd = open(file_name.c_str(), O_WRONLY);
+        if (fd == -1) {
+            err_exit("Unable open file for redirect");
+        }
+        dup2(fd, 2);  // Duplicate file handler -- redirect stderr
+        dup2(fd, 1);
+    }
+}
+
+
+int parse_line(std::string line, std::vector<std::vector<std::string>>& processes_args) {
+    boost::trim(line);
+    // get rid of comments
+    std::string::size_type pos = line.find('#');
+    if (pos != std::string::npos)
+    {
+        line = line.substr(0, pos);
+    }
+    // separate commands by |
+    std::vector<std::string> processes_strings;
+    boost::split(processes_strings, line, boost::is_any_of("|"));
+    for (int i = 0; i < processes_strings.size(); ++i) {
+        boost::trim(processes_strings[i]);
+        // split command line by whitespace
+        std::vector<std::string> v;
+        boost::split(v, processes_strings[i], boost::is_any_of(" "));
+        processes_args.emplace_back(v);
+    }
 
     return 0;
 }
 
-#ifdef __unix__
-void fork_exec(std::string& command, std::vector<std::string>& arguments) {
-
+void fork_exec(std::vector<std::string> arguments) {
     pid_t parent = getpid();
+    std::string command = arguments[0];
+
     pid_t pid = fork();
     if (fs::path(command).extension() == ".msh") {
         arguments = std::vector<std::string>{"myshell", command};
@@ -104,8 +156,7 @@ void fork_exec(std::string& command, std::vector<std::string>& arguments) {
     }
     if (pid == -1)
     {
-        std::cerr << "Failed to fork()" << std::endl;
-        exit(EXIT_FAILURE);
+        err_exit("Failed to fork");
     }
     else if (pid > 0)
     {
@@ -115,30 +166,134 @@ void fork_exec(std::string& command, std::vector<std::string>& arguments) {
     else
     {
         // We are the child
-        std::vector<const char*> arg_for_c;
+        exec_child_with_redirect(arguments);
+        err_exit("Parent: Failed to execute\n");
+    }
+}
 
-        arg_for_c.reserve(arguments.size());
-        for(const auto& s: arguments) {
-            arg_for_c.push_back(s.c_str());
+void dup_pipe_read(int* pfd) {
+    if (close(pfd[1]) == -1) {
+        err_exit("Failed to close pipe write entry\n");
+    }
+    if (pfd[0] != STDIN_FILENO) {       // defensive check
+        if (dup2(pfd[0], STDIN_FILENO) == -1) {
+            err_exit("Failed to dup2\n");
         }
-        arg_for_c.push_back(nullptr);
-        execvp(command.c_str(), const_cast<char* const *>(arg_for_c.data()));
-        std::cerr << "Parent: Failed to execute " << command << " \n\tCode: " << errno << "\n";
-        exit(EXIT_FAILURE);   // exec never returns
+        if (close(pfd[0]) == -1) {
+            err_exit("Failed to close pipe read entry\n");
+        }
     }
 }
-#elif WIN32
-void fork_exec(std::string& command, std::vector<std::string>& arguments) {
 
-}
-#else error: undefinded OS
-#endif
-
-int execute(std::string& command, std::vector<std::string>& arguments) {
-    if (internal_functions.find(command) != internal_functions.end()) {
-        return internal_functions.find(command)->second(arguments);
+void dup_pipe_write(int* pfd) {
+    if (close(pfd[0]) == -1) {
+        err_exit("Failed to close pipe read entry");
     }
-    fork_exec(command, arguments);
+    if (pfd[1] != STDOUT_FILENO) {      // defensive check
+        if (dup2(pfd[1], STDOUT_FILENO) == -1) {
+            err_exit("Failed to dup2");
+        }
+        if (close(pfd[1]) == -1) {
+            err_exit("Failed to close pipe write entry");
+        }
+    }
+}
+
+void exec_child_with_redirect(const std::vector<std::string>& args) {
+    std::string command = args[0];
+    std::vector<const char *> arg_for_c;
+    for(int i = 0; i < args.size(); ++i) {
+        if (is_redirection_symbol(args[i])) {
+            redirect(std::vector<std::string>(args.begin() + i, args.end()));
+            break;
+        }
+        arg_for_c.push_back(args[i].c_str());
+    }
+    arg_for_c.push_back(nullptr);
+
+    execvp(command.c_str(), const_cast<char *const *>(arg_for_c.data()));
+}
+
+int execute(std::vector<std::vector<std::string>> processes_args) {
+    bool in_background = false;
+    int external_commands_count = 0;
+    // create pipes
+    int count_pipes = processes_args.size() - 1;
+    int **pfd = new int *[count_pipes];
+    for (int i = 0; i < count_pipes; ++i) {
+        pfd[i] = new int[2];
+    }
+
+    for (int i = 0; i < count_pipes; ++i) {
+        if (pipe(pfd[i]) == -1) {
+            err_exit("Failed to create pipe");
+            return -1;
+        }
+    }
+
+    if (processes_args.back().back() == "&") {  // work in a background
+        processes_args.back().pop_back();
+        in_background = true;
+    }
+
+    // execute each process
+    for (int i = 0; i < processes_args.size(); ++i) {
+        std::string command = processes_args[i][0];
+        if (internal_functions.find(command) != internal_functions.end()) {     // if command is internal
+            if (i != count_pipes) {
+                dup_pipe_write(pfd[i]);
+            }
+            if (i != 0) {
+                dup_pipe_read(pfd[i - 1]);
+            }
+            internal_functions.find(command)->second(processes_args[i]);
+            if (i != 0) {
+                close(pfd[i - 1][0]);
+                close(pfd[i - 1][1]);
+            }
+            continue;
+        }
+        external_commands_count++;
+        if (fs::path(command).extension() == ".msh") {
+            processes_args[i] = std::vector<std::string>{"myshell", command};
+            command = "myshell";
+        }
+        switch(fork()) {        // if command is external then fork new proc
+            case -1: {   // failed to fork
+                err_exit("Parent: Failed to execute");
+            }
+            case 0: {     // child proc
+                if (i != count_pipes) {
+                    dup_pipe_write(pfd[i]);
+                }
+                if (i != 0) {
+                    dup_pipe_read(pfd[i - 1]);
+                }
+                exec_child_with_redirect(processes_args[i]);
+                err_exit("Parent: Failed to execute");
+            }
+            default:
+                if (i != 0) {
+                    close(pfd[i - 1][0]);
+                    close(pfd[i - 1][1]);
+                }
+                break;
+        }
+    }
+    // do not live zombies when parent ends
+    if (in_background) {
+        for (int i = 0; i < external_commands_count; ++i) {
+            signal(SIGCHLD, SIG_IGN);
+        }
+        return 0;
+    }
+
+    // waiting for children
+    for (int i = 0; i < external_commands_count; ++i) {
+        if (wait(NULL) == -1) {
+            err_exit("Failed to wait");
+        }
+    }
     return 0;
 }
 
@@ -155,7 +310,7 @@ bool read_line_from_shell(std::string& line) {
         return false;
     }
 
-    if (!strlen(line_buff) && fileno(rl_instream) == 0)
+    if (strlen(line_buff) && fileno(rl_instream) == 0)
         add_history(line_buff);
 
     line = line_buff;
@@ -167,7 +322,6 @@ void expand_variables(std::vector<std::string>& arguments) {
     for (auto& arg : arguments) {
         if (arg[0] != '$') continue;
         std::string var_name = arg.substr(1);
-#ifdef __unix__
         if (getenv(var_name.c_str())  != nullptr) {
             arg = getenv(var_name.c_str());
         }
@@ -175,11 +329,6 @@ void expand_variables(std::vector<std::string>& arguments) {
             arg = "";
         }
     }
-#elif WIN32
-    //GetEnvironmentVariable();
-#else
-#error: unknown OS
-#endif
 }
 
 int add_path_to_env(const std::string& new_path) {
@@ -189,4 +338,5 @@ int add_path_to_env(const std::string& new_path) {
         path_var = path_ptr;
     path_var += new_path;
     setenv("PATH", path_var.c_str(), 1);
+    return 0;
 }

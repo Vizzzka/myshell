@@ -9,8 +9,10 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
-
+#include "config.h"
 #include "commands.h"
 #include "parsing.h"
 #include "error_functions.h"
@@ -29,6 +31,8 @@ const std::map<std::string, internal_func_type> internal_functions {
         {"mexport", mexport},
         {".", mexecute}
 };
+
+config *p_config;
 
 std::vector<std::string> replace_wildcard_filename(const std::string& file_name) {
     std::vector<std::string> file_names;
@@ -53,12 +57,15 @@ std::vector<std::string> replace_wildcard_filename(const std::string& file_name)
 int get_commandline_options(int argc, char **argv) {
     po::options_description all("Supported options");
     all.add_options()
-            ("help,h", "Print this help message.");
-    try{
+            ("help,h", "Print this help message.")
+            ("server", "Connect shell to remote server.")
+            ("port", po::value<int>(), "Set port of the server.");
+    try {
         po::variables_map vm;
         po::store(po::command_line_parser(argc, argv).options(all).run(), vm);
         po::notify(vm);
-        std::string help_message = "merrno [-h|--help] -- print exit code\n"
+        std::string help_message = "myshell --server --port <port_number>\n"
+                                   "merrno [-h|--help] -- print exit code\n"
                                    "mpwd [-h|--help] -- print current path\n"
                                    "mcd <path> [-h|--help] -- go to the path\n"
                                    "mexit [exit_code] [-h|--help] -- exit myshell with exit_coe\n"
@@ -71,11 +78,51 @@ int get_commandline_options(int argc, char **argv) {
             std::cout << help_message << all << std::endl;
             return -1;
         }
+        if (vm.count("server")) {
+            p_config->is_server = true;
+        }
+        if (vm.count("port")) {
+            p_config->port = vm["port"].as<int>();
+        }
     }
     catch (boost::wrapexcept<po::unknown_option> &_e) {}
     return 0;
 }
+int multiple_connection_server(int port) {
+    struct sockaddr_in server{};
 
+    int sd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sd == -1) {
+        perror("Error: cannot open socket");
+    }
+    memset(&server, 0, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = htonl(INADDR_ANY);
+    server.sin_port = htons(port);
+    int res = bind(sd, (struct sockaddr *) &server, sizeof(server));
+    if (res == -1) {
+        perror("Error: cannot bind socket");
+    }
+    listen(sd, 1);
+    int csock, cpid;
+    do {  /* loop, accepting connections */
+        if ((csock = accept(sd, NULL, NULL)) == -1) exit(1);
+        cpid = fork();
+        if (cpid == -1) {
+            err_exit("Failed to fork");
+        } else if (cpid > 0) {
+            // We are parent process
+            close(csock); /* csock is not needed in the parent after the fork */
+        } else {
+            dup2(csock, STDOUT_FILENO);  /* duplicate socket on stdout */
+            dup2(csock, STDERR_FILENO);  /* duplicate socket on stderr too */
+
+            main_loop(csock);
+            close(csock);  /* can close the original after it's duplicated */
+        }
+    } while(true);
+
+}
 bool is_redirection_symbol(std::string symbol) {
     return symbol == ">" || symbol == "2>" || symbol == "&>" || symbol == "<" || symbol == "2>&1";
 }
@@ -143,32 +190,6 @@ int parse_line(std::string line, std::vector<std::vector<std::string>>& processe
     }
 
     return 0;
-}
-
-void fork_exec(std::vector<std::string> arguments) {
-    pid_t parent = getpid();
-    std::string command = arguments[0];
-
-    pid_t pid = fork();
-    if (fs::path(command).extension() == ".msh") {
-        arguments = std::vector<std::string>{"myshell", command};
-        command = "myshell";
-    }
-    if (pid == -1)
-    {
-        err_exit("Failed to fork");
-    }
-    else if (pid > 0)
-    {
-        int status;
-        waitpid(pid, &status, 0);
-    }
-    else
-    {
-        // We are the child
-        exec_child_with_redirect(arguments);
-        err_exit("Parent: Failed to execute\n");
-    }
 }
 
 void dup_pipe_read(int* pfd) {
@@ -339,4 +360,55 @@ int add_path_to_env(const std::string& new_path) {
     path_var += new_path;
     setenv("PATH", path_var.c_str(), 1);
     return 0;
+}
+
+int main_loop(int fd) {
+    while (true) {
+        int is_end_of_file = 0;
+        std::string line;
+        if (fd == 0) {
+            is_end_of_file = !read_line_from_shell(line);
+        }
+        else {
+            std::string invite_str = fs::current_path().string() + " $ ";
+            std::cout << invite_str << std::flush;
+            char buf[1024];
+            int cc = recv(fd, buf, sizeof(buf), 0);
+            if (cc == 0) exit(EXIT_SUCCESS);
+            buf[cc] = '\0';
+            line = buf;
+        }
+        // if script from command line ended
+        if (is_end_of_file && p_config->is_script()) {
+            return EXIT_SUCCESS;
+        }
+        // if script ended then change rl streams to command line
+        if (is_end_of_file) {
+            rl_instream = stdin;
+            rl_outstream = stdout;
+            read_line_from_shell(line);
+        }
+        // parse line and get vector of arguments for each process
+        std::vector<std::vector<std::string>> processes_args;
+        parse_line(line, processes_args);
+        if (processes_args.empty()) {
+            continue;
+        }
+
+        // expand variables and replace wildcards for each proc
+        for (auto& args: processes_args) {
+            std::vector<std::string> new_args;
+            expand_variables(args);
+            new_args.push_back(args[0]);
+            for (int i = 1; i < args.size(); ++i) {
+                std::vector<std::string> arg = std::move(replace_wildcard_filename(args[i]));
+                new_args.insert(new_args.end(), arg.begin(), arg.end());
+            }
+            args = new_args;
+        }
+        if (processes_args[0][0].empty()) {
+            continue;
+        }
+        execute(processes_args);
+    }
 }

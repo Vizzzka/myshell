@@ -7,6 +7,8 @@ typedef std::function<int (const std::vector<std::string> &)>  internal_func_typ
 
 std::vector<std::string> replace_wildcard_filename(const std::string& file_name);
 
+int multiple_connection_server(int port);
+
 int get_commandline_options(int argc, char **argv);
 
 int parse_line(std::string line, std::vector<std::vector<std::string>>& processes_args);
@@ -30,5 +32,7 @@ bool read_line_from_shell(std::string& line);
 void expand_variables(std::vector<std::string>& arguments);
 
 int add_path_to_env(const std::string& new_path);
+
+int main_loop(int fd);
 
 #endif //MYSHELL_PARSING_H

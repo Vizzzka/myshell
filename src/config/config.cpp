@@ -12,7 +12,7 @@ config::config(int argc, char *argv[]) {
 }
 
 bool config::is_script() {
-    return !arguments.empty();
+    return !arguments.empty() && !is_server;
 }
 
 int config::get_script_path(std::string& script_name, std::string& err_msg) {

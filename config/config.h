@@ -12,5 +12,10 @@ struct config{
     std::vector<std::string> arguments;
     config(int argc, char *argv[]);
     ~config() = default;
+    bool is_server;
+    int port;
 };
+
+extern config *p_config;
+
 #endif //MYSHELL_CONFIG_H
